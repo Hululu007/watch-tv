@@ -10,7 +10,6 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -19,10 +18,8 @@ import androidx.core.os.HandlerCompat;
 
 import com.bumptech.glide.Glide;
 import com.fongmi.android.tv.db.AppDatabase;
-import com.fongmi.android.tv.setting.Setting;
 import com.fongmi.android.tv.utils.BootSession;
 import com.fongmi.android.tv.utils.Notify;
-import com.fongmi.android.tv.utils.Util;
 import com.fongmi.hook.DelegateHook;
 import com.fongmi.hook.Hook;
 import com.github.catvod.Init;
@@ -58,14 +55,6 @@ public class App extends Application implements Application.ActivityLifecycleCal
     private Activity activity;
     /** 全局转发代理：覆写 Android 13+ 新增具体方法，转发系统实现，避免基类抛 UnsupportedOperationException 崩溃。 */
     private Hook global;
-    /**
-     * 上一次「待机唤醒主动拉起」的时刻（elapsedRealtime，R137 / F4）。
-     *
-     * <p>去重闸门：SCREEN_ON 在某些 ROM 上可能连发（息屏动画、多用户切换），连发两次就会
-     * 连续 startActivity 两次。与 {@code BootLauncher} 的 1 秒闸门同一个量级；这里是静态字段，
-     * 因为拉起发生在 Application 生命周期内、不存在实例销毁重建的问题。</p>
-     */
-    private static long lastWakePullAt;
 
     public App() {
         instance = this;
@@ -180,9 +169,13 @@ public class App extends Application implements Application.ActivityLifecycleCal
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     BootSession.onScreenOn();
-                    // R137（F4）：非默认桌面电视待机唤醒后，系统只会恢复它自己的桌面，
-                    // 本应用（哪怕待机前就在前台）不会被拉起 —— 在这里补一次主动拉起。
-                    pullOnWakeIfNeeded();
+                    // R156：标准版**不做「待机唤醒拉起」**。
+                    //   本树没有 HOME 角色、没有开机广播拉起，是「手动打开」形态（拉起能力只属于功能版）；
+                    //   继承来的亮屏主动拉起会让老人一开电视就被抢屏，而控制它的 boot_autostart
+                    //   在本树没有任何 UI 入口可关（默认 true）⇒ 等于关不掉，故整条调用摘除。
+                    //   ⚠ 拉起实现已在本树**整体删除**（不留死代码，免得后人以为本树还有这能力）：
+                    //     功能版 repo-autostart 的 App.java 仍完整保留，两树从本轮起在此文件上有意分叉。
+                    // pullOnWakeIfNeeded();
                 }
             }, new IntentFilter(Intent.ACTION_SCREEN_ON), ContextCompat.RECEIVER_EXPORTED);
         } catch (Throwable e) {
@@ -190,59 +183,9 @@ public class App extends Application implements Application.ActivityLifecycleCal
         }
     }
 
-    /**
-     * 待机唤醒时若本应用不在前台，延迟后主动拉起一次（R137 / F4，修「非默认桌面唤醒不直达」）。
-     *
-     * <p><b>为什么只限 leanback</b>：手机的电源键亮屏是高频事件（口袋里碰到、看时间），
-     * 若手机上也做「亮屏拉起应用」，用户会被反复拽进 App —— 这是绝对不能发生的事故。
-     * 用 {@link Util#isLeanback()}（main 层现成的 flavor 判定，不引用 flavor 类）在编译期隔离。</p>
-     *
-     * <p><b>为什么延迟 300ms</b>：默认桌面形态下，系统唤醒时本来就会把本应用恢复到前台
-     * （HOME 意图或 Activity 栈恢复）。若不等待就拉，可能与系统自己的恢复动作赛跑 ——
-     * 虽然 {@code FLAG_ACTIVITY_SINGLE_TOP} 会让两次启动合并到同一实例，但多一次
-     * {@code onNewIntent} 会让首页多走一遍刷新分支。延迟后系统恢复基本已完成，
-     * {@code App.activity() != null} 的短路就会生效，直接跳过。</p>
-     *
-     * <p><b>为什么拉起动作不走 {@code BootLauncher.forBoot}</b>：本类在 main flavor，
-     * {@code BootLauncher} 在 leanback flavor —— main 编译期引用不到 flavor 类。
-     * 所以这里自带一套与 {@code BootLauncher.start} 等价的拉起逻辑：
-     * {@code getLaunchIntentForPackage} 产出 LAUNCHER 意图（首页判为普通启动，可触发直达），
-     * 打 {@link BootSession#EXTRA_BOOT_LAUNCH}（「系统替老人打开」语义，允许续播），
-     * 与 1 秒去重闸门。开关守卫与 {@code BootLauncher.isBootAutostartEnabled} 同口径：
-     * 解锁前读不到偏好按「开」处理。</p>
-     */
-    private void pullOnWakeIfNeeded() {
-        if (!Util.isLeanback()) return;
-        // 延迟一拍再判定：给系统恢复前台留时间（默认桌面场景直接被 activity() 短路）
-        new Handler(Looper.getMainLooper()).postDelayed(this::pullOnWake, 300L);
-    }
-
-    private void pullOnWake() {
-        try {
-            if (!BootSession.isWakeSession()) return;
-            if (activity != null) return; // 本应用已在前台，系统会自行恢复原页面
-            boolean userExited = true;
-            boolean autostart = true;
-            try {
-                userExited = Setting.isUserExited();
-                autostart = Setting.isBootAutostart();
-            } catch (Throwable ignore) {
-                // 解锁前凭据加密存储不可读：按「未退出、自启开」的默认处理（与 BootLauncher 同口径）
-            }
-            if (userExited || !autostart) return;
-            long now = SystemClock.elapsedRealtime();
-            if (now - lastWakePullAt < 1000L) return;
-            lastWakePullAt = now;
-            Intent launcher = getPackageManager().getLaunchIntentForPackage(getPackageName());
-            if (launcher == null) return;
-            launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            launcher.putExtra(BootSession.EXTRA_BOOT_LAUNCH, true);
-            startActivity(launcher);
-            android.util.Log.i("BootSession", "待机唤醒，本应用不在前台，已主动拉起");
-        } catch (Throwable t) {
-            android.util.Log.w("BootSession", "待机唤醒拉起失败", t);
-        }
-    }
+    // R156：原 pullOnWakeIfNeeded / pullOnWake（亮屏后主动拉起本应用）已在本树删除 ——
+    //   标准版是「手动打开」形态，不做待机唤醒拉起；该能力只保留在 repo-autostart 树。
+    //   删除范围：两个私有方法 + lastWakePullAt 字段 + 不再使用的 SystemClock import。
 
     @Override
     public PackageManager getPackageManager() {

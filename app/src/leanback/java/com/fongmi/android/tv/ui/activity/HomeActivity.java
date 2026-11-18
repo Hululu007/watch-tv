@@ -1128,7 +1128,10 @@ public class HomeActivity extends BaseActivity implements VodPresenter.OnClickLi
             // R137（F3）：加第三条判据「快速开机唤醒」—— 部分固件的 QUICKBOOT_POWERON 实为待机唤醒
             //（elapsedRealtime 未重置，inBootPhase() 为 false），且待机时不发 SCREEN_OFF 广播，
             // R134 的熄屏/亮屏快照判据也拿不到 ⇒ 只能靠 BootReceiver 打的快速开机标记兜底。
-            mBootSession = inBootPhase() || BootSession.isWakeSession() || BootSession.isQuickBootWake();
+            // R156：右式去掉 BootSession.isWakeSession() —— 标准版不再有「唤醒会话」这一概念
+            //   （手机端 HomeActivity 连 BootSession 都不引用）。剩下的两个操作数在本树恒为 false
+            //   （无 HOME 意图 ⇒ 外层 (bootLaunch || home) 不成立），属结构性不可达，留作将来清理。
+            mBootSession = inBootPhase() || BootSession.isQuickBootWake();
             if (mBootSession && !inBootPhase()) BootSession.consumeWake();
         }
     }
@@ -2563,14 +2566,11 @@ public class HomeActivity extends BaseActivity implements VodPresenter.OnClickLi
         // 从二级页 / 播放页回到首页：退出连按从头计，避免「按了一下又离开、回来再按一下就退」。
         resetBackTaps();
         mClock.start();
-        // R124：待机唤醒 —— 中国老人最常见的「开机」是按遥控器上的关机键（待机 STR），不是拔插头。
-        //   熄屏时首页在前台、待机 ≥60 秒、距亮屏 ≤60 秒（R134）⇒ 这一次算「开机会话」，重新发起一次直达。
-        //   ⚠ 判定必须在 onHomeVisible() 之前：后者会把「首页最后一次可见时刻」推到当前，
-        //   熄屏时刻就变成「早于首页可见」⇒ 判定恒为 false。
-        if (BootSession.isWakeSession()) {
-            BootSession.consumeWake();
-            rearmBootDirect();
-        }
+        // R156：标准版**删除「唤醒会话重判」**，与手机端口径对齐（手机端没有 BootSession/唤醒概念）。
+        //   原逻辑：熄屏前停在首页 + 待机≥10s + 亮屏≤60s ⇒ consumeWake + rearmBootDirect，
+        //   会把 mBootSession 置 true 并让 checkBootDirect 再跑一遍（同一实例第二次自动跳进上次那部剧）。
+        //   删除理由：标准版是「手动打开」形态，不该有唤醒门控；且它正是「手机端没有、电视端却有」的最后一条差异。
+        //   ⚠ 保留 BootSession.onHomeVisible() —— 它维护「首页最后一次可见时刻」，与唤醒判据无关。
         BootSession.onHomeVisible();
         // R132：退后台补偿 —— isWakeSession 要求待机满 60 秒（R134），更短的快速待机（几秒~几十秒）
         // 回来什么都不做；而「开机那次没跳成」的直达目标（例如直播配置当时没就绪）会一直挂着，
