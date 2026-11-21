@@ -21,10 +21,10 @@ android {
         targetSdk libs.versions.targetSdk.get().toInteger()
         // 版本号规则（2026-11-10 用户定案，修订 ★AF）：标准版 = GitHub 最新发布 + 1；
         // 自启版 = 标准版 + 1 —— 两棵树恒定相差 1（旧规矩"差 3"作废）。
-        // 拆位：major = code/100，minor = (code%100)/10，patch = code%10 ⇒ 646 = 6.4.6。
-        // 当前 GitHub 最新 = v6.4.3（自启版）⇒ 本轮出「标准版去掉待机唤醒拉起」：646 / 647。
-        versionCode 648
-        versionName "6.4.8"
+        // 拆位：major = code/100，minor = (code%100)/10，patch = code%10 ⇒ 650 = 6.5.0。
+        // R158：键盘 6 列 + 焦点态两态化 + 文案精简繁转简 + 主页键/返回键断点，升 6.5.0。
+        versionCode 650
+        versionName "6.5.0"
         javaCompileOptions {
             annotationProcessorOptions {
                 arguments = ["room.schemaLocation": "$projectDir/schemas".toString(), "eventBusIndex": "com.fongmi.android.tv.event.EventIndex"]
